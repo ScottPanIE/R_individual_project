@@ -111,3 +111,10 @@ glimpse(train_ymd)
 
 hist(train_ymd$zipcode)
 hist(train_ymd$month)
+
+
+formula<-as.formula(price~.)   # price against all other variables
+library(randomForest)
+
+rf_0<-randomForest(formula=formula, data=train_ymd)
+print(rf_0)
