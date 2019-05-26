@@ -1,0 +1,366 @@
+---
+title: "HousePrice"
+author: "Jiachao Pan"
+date: "5/24/2019"
+output: html_document
+---
+## Load Libraries and Dataset
+### please double check your working directory
+```{r include=FALSE}
+if(!require(tidyr)){install.packages("tidyr")}
+if(!require(dplyr)){install.packages("dplyr")}
+if(!require(data.table)){install.packages("data.table")}
+if(!require(randomForest)){install.packages("randomForest")}
+if(!require(ggplot2)){install.packages("ggplot2")}
+if(!require(corrplot)){install.packages("corrplot")}
+if(!require(caret)){install.packages("caret")}
+if(!require(reshape2)){install.packages("reshape2")}
+
+Packages <- c("tidyr", "dplyr", "data.table", "randomForest", "ggplot2", "corrplot", "caret", "reshape2")
+invisible(lapply(Packages, library, character.only = TRUE))
+
+# setwd("~/Desktop/IEMBD/TERM3/R/individual_project/script")
+# need to split train into train and test later
+train <- read.csv('../data/house_price_train.csv')
+# test sets is used for submission only
+submission <- read.csv('../data/house_price_test.csv')
+```
+
+## Data Exploration And Data Cleaning
+
+### Check for the structure of the dataset
+
+As shown, all the features are presented as numerical variables, even though the features may be categorical.
+For example, zipcode doesn't have numerical meaning. It identifies different districts, so it should be considered as a categorical variable.
+```{r echo=FALSE}
+glimpse(train)
+```
+### Check for missing values
+As shown from the results, there are no missing values in both training set and submission set at this moment.
+```{r echo=TRUE}
+print(any(is.na(train)))
+print(any(is.na(submission)))
+```
+
+### Understand Variables
+
+#### id
+**id** means identification of each observation, and it should be unique. However, as shown from the result, the dataset contains duplicates. In the training set, there are 17277 rows, but only 17173 unique ids. Therefore, we are going to remove the duplicates, and only keep one for each id.
+
+```{r}
+print(length(train$id))
+print(length(unique(train$id)))
+train <- train[!duplicated(train$id), ]
+
+```
+
+#### date
+
+**date** means the date corresponding to the house and its price. As shown from the result, it only contains the year 2014 and 2015. Maybe the different years will affect the house price? Also for different months or days? As shown from the density plot, in a overall view, the date information doesn't seem to make any difference. But for the similar houses in different time, it may have different prices. So we are going to keep the date information as for now.
+```{r}
+train_ymd <- separate(train, col = date, into = c("month","day","year"), sep = "/")
+print(unique(train_ymd$year))
+train_ymd$year <- as.factor(train_ymd$year)
+train_ymd$month <- as.factor(train_ymd$month)
+train_ymd$day <- as.factor(train_ymd$day)
+
+ggplot(train_ymd, aes(x=price, fill=year)) + geom_density(alpha=0.25) + theme_minimal()
+ggplot(train_ymd, aes(x=price, fill=month)) + geom_density(alpha=0.25) + theme_minimal()
+ggplot(train_ymd, aes(x=price, fill=day)) + geom_density(alpha=0.25) + theme_minimal()
+
+```
+
+#### price
+
+**price** is the target variable. From the visualization, we can tell most of the house prices concentrate in the low range with a few outliers. So in the modeling part, maybe it will be useful to scale price as well.
+
+
+```{r}
+ggplot(train_ymd, aes(x=price)) + geom_density(alpha=0.25) + theme_minimal()
+
+```
+
+#### bedrooms and bathrooms
+
+As shown from the density plot, price does based on bedrooms and bathrooms. So we can treat those two variables as numeric or as factor. However, for bathrooms, if we treat it as factor, there will be too many factor levels, so it's better to treat as numeric.
+
+```{r}
+train_ymd$bedrooms <- as.factor(train_ymd$bedrooms)
+train_ymd$bathrooms <- as.factor(train_ymd$bathrooms)
+
+ggplot(train_ymd, aes(x=price, fill=bedrooms)) + geom_density(alpha=0.25) + theme_minimal()
+ggplot(train_ymd, aes(x=price, fill=bathrooms)) + geom_density(alpha=0.25) + theme_minimal()
+```
+#### sqft_living, sqft_lot, sqft_living15, sqft_lot15, yr_renovated
+
+As shown in the data, there are pairs of variables such as sqft_living and sqft_living15, and sqft_lot and sqft_lot15. The variables with **15** means the data is collected again in the year of 2015, maybe? Logically, it doesn't make sense if it's collected in the year of 2015 because some houses are sold in the year of 2014. So at this moment, let's assume it's collected again after the house is renovated.
+
+So we are going to create a new variable describes whether the house is renovated. Logically, if the house is not renovated, then sqft_lot and sqft_lot15 should be the same, also the same for sqft_living and sqft_living15. However, as shown from the plots, the house which has not been renovated still shows different data. So the variable with number 15 may provide some other information, we are going to keep them for now.
+
+```{r}
+train_ymd$renovate[train_ymd$yr_renovated==0] <- 0
+train_ymd$renovate[train_ymd$yr_renovated!=0] <- 1
+train_ymd$renovate <- as.factor(train_ymd$renovate)
+ggplot(train_ymd, aes(x=sqft_living, y=sqft_living15, color=renovate)) + geom_point(alpha=0.2) + theme_minimal() + xlim(0, 15000) + ylim(0, 15000) + geom_abline(intercept = 0, slope = 1, color="black", linetype="dashed", size=1.5)
+
+max_sqftlot <- max(max(train_ymd$sqft_lot15),max(train_ymd$sqft_lot))
+ggplot(train_ymd, aes(x=sqft_lot, y=sqft_lot15, color=renovate)) + geom_point(alpha=0.2) + theme_minimal() + xlim(0, max_sqftlot) + ylim(0, max_sqftlot) + geom_abline(intercept = 0, slope = 1, color="black", linetype="dashed", size=1.5)
+
+```
+
+#### floors, waterfront, view, condition, grade
+
+Those five variables are factor variables, but some of them, ***floors*** and ***condtion**, have numerical meanings. The meanings of these variables are apparent except view and grade. My guess is **view** means how many people have viewed the house, and **grade** is the grade provided by the websites or by the people who viewed the house. So both of them have numerical meanings.
+
+```{r}
+unique(train_ymd$floors)
+unique(train_ymd$waterfront)
+unique(train_ymd$view)
+unique(train_ymd$condition)
+unique(train_ymd$grade)
+
+train_ymd$waterfront <- as.factor(train_ymd$waterfront)
+```
+
+#### sqft_above, sqft_basement
+
+As shown from the plots, the size of the basement doesn't seem to matter the price a lot, while the sqft_above has a more obvious linear relationship with price. So for the sqft_basement, maybe we can create a boolean feature describes whether the house has basement or not. Also, logically, the sqft_basement should be depends on the size of the house. So, sqft_basement maybe a redundent feature.
+
+```{r}
+ggplot(train_ymd, aes(x=sqft_basement, y=price)) + geom_point(alpha=0.2) + theme_minimal() 
+
+ggplot(train_ymd, aes(x=sqft_above, y=price)) + geom_point(alpha=0.2) + theme_minimal() 
+
+ggplot(train_ymd, aes(x=sqft_above, y=sqft_basement)) + geom_point(alpha=0.2) + theme_minimal() 
+
+train_ymd$basement[train_ymd$sqft_basement==0] <- 0
+train_ymd$basement[train_ymd$sqft_basement>0] <- 1
+```
+
+
+#### yr_built, yr_renovated
+
+As the variables **yr_built** and **yr_renovated** present the years when the house was built and renovated, we are not going to use it as numerical variables directly. Instead, we can calculate the age of the house, and how long it's been since the last renovation.
+
+```{r}
+train_ymd$year <- as.numeric(train_ymd$year)
+train_ymd$build_age <- (train_ymd$year - train_ymd$yr_built)
+train_ymd$reno_age <- (train_ymd$year - train_ymd$yr_renovated)
+
+```
+
+Now lets take a look of the correlation matrix. As shown from the heatmap, **sqft_living**, **bathrooms**, **grade**, **sqft_above**, and **sqft_living15** seems to be the top features for **price**, while the **build_age** and **reno_age** has slightly negative impact on the price.
+
+```{r}
+
+num_cols <- c('price','bedrooms','bathrooms','sqft_living','sqft_lot',
+              'floors','waterfront','view','condition','grade',
+              'sqft_above','sqft_basement','basement',
+              'yr_built','yr_renovated','sqft_living15','sqft_lot15',
+              'lat','long','build_age','reno_age')
+train_num <- train_ymd[,num_cols]
+for(colnum in num_cols){train_num[,colnum] <- as.numeric(train_num[,colnum])}
+
+corr_matrix <- cor(train_num)
+corrplot(corr_matrix, type = "lower")
+```
+
+
+### Consturct a function that process the data step by step.
+
+The reason I construct the function is that I want to implement the exact same steps on the submission dataset as well.
+
+```{r}
+# the function used to clean the data
+# will first try everything then put them into functions and apply to both train and submission
+clean_data <- function(df){
+  # remove duplicates
+  df <- df[!duplicated(df$id), ]
+  
+  # split the sales date to year month day and convert to factor
+  df_ymd <- separate(df, col = date, into = c("month","day","year"), sep = "/")
+  # convert to numeric
+  cols2nums <- c('month','day','year','bedrooms','bathrooms')
+  for(colnum in cols2nums){df_ymd[,colnum] <- as.numeric(df_ymd[,colnum])}
+
+  # calculate the age of the house
+  df_ymd$build_age <- (df_ymd$year - df_ymd$yr_built)
+  df_ymd$reno_age <- (df_ymd$year - df_ymd$yr_renovated)
+  # create boolean features
+  df_ymd$renovate[df_ymd$yr_renovated==0] <- 0
+  df_ymd$renovate[df_ymd$yr_renovated!=0] <- 1
+  df_ymd$basement[df_ymd$sqft_basement==0] <- 0
+  df_ymd$basement[df_ymd$sqft_basement>0] <- 1
+  
+  # # bin the numerical features(the sqft ones)
+  # df_ymd$sqft_living15 <- .bincode(df_ymd$sqft_living15,c(0,1000,2000,3000,4000,5000,6000,1000000),TRUE,TRUE)
+  # df_ymd$sqft_lot15 <- .bincode(df_ymd$sqft_lot15,c(0,5000,10000,15000,20000,25000,1000000),TRUE,TRUE)
+  # df_ymd$sqft_above <- .bincode(df_ymd$sqft_above,c(0,500,1000,1500,2000,2500,1000000),TRUE,TRUE)
+  # df_ymd$sqft_basement <- .bincode(df_ymd$sqft_basement,c(0,1,200,400,600,800,1000,1500,1000000),TRUE,TRUE)
+  # # df_ymd$yr_built <- .bincode(df_ymd$yr_built,c(1900,1920,1940,1960,1980,2000,2020,1000000),TRUE,TRUE)
+  # df_ymd$yr_renovated <- .bincode(df_ymd$yr_renovated,c(0,1900,1920,1940,1960,1980,2000,2020,1000000),TRUE,TRUE)
+  # # df_ymd$bedrooms_fct <- .bincode(df_ymd$bedrooms,c(0,1900,1920,1940,1960,1980,2000,2020,1000000),TRUE,TRUE)
+  # 
+  
+  # factorize the features
+  col2factor <- c("year","month","day","zipcode","basement",
+                  # 'bedrooms',"sqft_living15","sqft_lot15","sqft_above","sqft_basement","floors"
+                  "view","condition","yr_built","yr_renovated","waterfront")
+  
+  for(col_name in col2factor){df_ymd[,col_name] <- as.factor(df_ymd[,col_name])}
+  # decide which features to drop
+  cols2drop <- c('condition','month','day','yr_built','yr_renovated','zipcode')
+  df_ymd <- select(df_ymd,-cols2drop)
+  
+  # scale data
+  scale_cols <- c('bedrooms','bathrooms','floors','grade',
+                'sqft_living','sqft_lot','sqft_above','sqft_basement','sqft_living15','sqft_lot15',
+                'lat','long','build_age','reno_age')
+  for(col_name in scale_cols){df_ymd[[col_name]] <- scale(df_ymd[[col_name]])}
+
+  print("Missing Values? ")
+  print(any(is.na(df_ymd)))
+  
+  return(df_ymd)
+}
+```
+
+### Process the data
+
+As the process function is constructed, we can process the training set and the submission set(the data without target variable) by the exact same steps.
+
+```{r}
+# reload the data
+train <- read.csv('../data/house_price_train.csv')
+submission <- read.csv('../data/house_price_test.csv')
+
+train_ymd <- clean_data(train)
+submission_ymd <- clean_data(submission)
+
+```
+
+## Modeling Part
+
+### Split the data
+
+We randomly split the training data into 80% training and 20% test
+
+```{r}
+test_index <- sample(1:nrow(train_ymd), size = 0.2*nrow(train_ymd))
+data.test <- train_ymd[test_index,]
+data.train <- train_ymd[-test_index,]
+```
+
+### Metrics function
+
+We are using Mean Absolute Percentage Error as the metrics of the model's performance.
+
+```{r}
+mape<-function(real,predicted){
+  return(mean(abs((real-predicted)/real)))
+}
+```
+
+### Random forest
+
+Due to some unknown reasons, everytime I tried to run the random search, Rstudio was not responding.
+```{r}
+# the random search took too much time to run
+# # Random Search
+# control <- trainControl(method="repeatedcv", number=10, repeats=3, search="random")
+# set.seed(666)
+# mtry <- sqrt(ncol(data.train))
+# rf_random <- train(price~., data=data.train, method="rf", metric="rmse", tuneLength=15, trControl=control)
+# print(rf_random)
+# plot(rf_random)
+```
+
+So here I will do a simple random forest model with the already processed data. 
+
+```{r}
+formula<-as.formula(price~.)   # price against all other variables
+### random forest
+rf_0<-randomForest(formula=formula, data=data.train)
+print(rf_0)
+
+data.test$pred_rf0 <- predict(rf_0,data.test)
+mape(data.test$price,data.test$pred_rf0)
+```
+
+### Linear regression
+
+Besides, we also perform an simple linear regression. Comparing the results of both models, random forest takes much more time to train, but provides a much better model regarding to the MAPE.
+
+```{r}
+model_lm<-lm(formula = formula,data=data.train)
+print(model_lm)
+data.test$pred_lm <- predict(model_lm,data.test)
+mape(data.test$price,data.test$pred_lm)
+```
+
+### Visualization of the result
+
+As shown from the scatter plot, when the house price is in the lower range, the model is good at predicting the prices. However, when the price is in the upper range, the model is not strong at predicting the true price, it often tends to overestimate the house price.
+
+```{r}
+data.test$overestimate[data.test$pred_rf0 > data.test$price] <- 1
+data.test$overestimate[data.test$pred_rf0 <= data.test$price] <- -1
+data.test$overestimate <- as.factor(data.test$overestimate)
+
+ggplot(data.test, aes(x=pred_rf0, y=price, color=overestimate)) + geom_point(alpha=0.2) + geom_abline(intercept = 0, slope = 1, color="black", linetype="dashed", size=1.5) +theme_minimal() 
+
+ggplot(data.test, aes(x=price, fill=overestimate)) + geom_density(alpha=0.25) + theme_minimal()
+ggplot(data.test, aes(x=pred_rf0, fill=overestimate)) + geom_density(alpha=0.25) + theme_minimal()
+
+```
+
+From the density plot of price vs predicted price, we can tell in the large picture, the model is able to capture the most of the target data.
+
+```{r}
+# construct data for plot
+data.plot <- select(data.test, c("pred_rf0","price"))
+data.plot <- melt(data.plot) 
+ggplot(aes(x=value, colour=variable), data=data.plot) + geom_density() + theme_minimal()
+```
+
+### Additonal Thoughts
+
+From the results, we realize that the model is not good at predict the price in the upper range. It tends to overestimate the house price. So maybe there are some numerical features have nonlinear relationship with house price? For example the sqft_XXXX features, instead of use them right away, we are going to try **sqrt(features)**. However, as shown from the result, it doesn't seem to help the model's performance.
+
+```{r}
+train_ymd <- clean_data(train)
+train_ymd$sqrt_living <- sqrt(train_ymd$sqft_living)
+train_ymd$sqrt_lot <- sqrt(train_ymd$sqft_lot)
+train_ymd$sqrt_living15 <- sqrt(train_ymd$sqft_living15)
+train_ymd$sqrt_lot15 <- sqrt(train_ymd$sqft_lot15)
+train_ymd$sqrt_above <- sqrt(train_ymd$sqft_above)
+train_ymd$sqrt_basement <- sqrt(train_ymd$sqft_basement)
+sqft2drop <- c("sqft_living","sqft_lot","sqft_living15","sqft_lot15","sqft_above","sqft_basement")
+train_ymd2 <- select(train_ymd, -sqft2drop)
+# scale
+scale_cols <- c("sqrt_living","sqrt_lot","sqrt_living15","sqrt_lot15","sqrt_above","sqrt_basement")
+for(col_name in scale_cols){train_ymd2[[col_name]] <- scale(train_ymd2[[col_name]])}
+# split
+test_index <- sample(1:nrow(train_ymd2), size = 0.2*nrow(train_ymd2))
+data2.test <- train_ymd2[test_index,]
+data2.train <- train_ymd2[-test_index,]
+sum(is.na(data2.test$price))
+sum(is.na(data2.train$price))
+
+# model
+formula<-as.formula(price~.)   # price against all other variables
+### random forest
+rf_1<-randomForest(formula=formula, data=data2.train,na.action = na.omit)
+print(rf_1)
+
+data2.test$pred_rf1 <- predict(rf_1,data2.test)
+mape(data2.test$price,data2.test$pred_rf1)
+```
+
+## Export the prediction
+
+```{r}
+submission_ymd$prediction <- predict(rf_0,submission_ymd)
+submission_final <- select(submission_ymd, c("prediction"))
+write.csv(submission_final,'prediction.csv', row.names = FALSE)
+```
